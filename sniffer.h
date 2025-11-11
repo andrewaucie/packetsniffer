@@ -102,6 +102,42 @@ struct PacketSummary {
     int ttl; // TTL value (for IPv4/IPv6)
 };
 
+/**
+ * @struct ConversationTimelineEntry
+ * @brief Tracks timing milestones and byte counts for a TCP conversation.
+ */
+struct ConversationTimelineEntry {
+    std::string flow_label;
+    std::string client_ip;
+    std::string server_ip;
+    uint16_t client_port;
+    uint16_t server_port;
+
+    struct timeval start_ts;
+    struct timeval last_ts;
+
+    bool syn_seen;
+    bool synack_seen;
+    bool ack_seen;
+    struct timeval syn_ts;
+    struct timeval synack_ts;
+    struct timeval ack_ts;
+
+    bool first_payload_c2s_seen;
+    bool first_payload_s2c_seen;
+    struct timeval first_payload_c2s_ts;
+    struct timeval first_payload_s2c_ts;
+
+    bool closed;
+    struct timeval close_ts;
+
+    size_t bytes_c2s;
+    size_t bytes_s2c;
+
+    std::string forward_key;
+    std::string reverse_key;
+};
+
 // --- Thread-Safe Global "Model" ---
 
 // Global flag to signal all threads to shut down
@@ -126,5 +162,10 @@ extern std::atomic<long> tcp_session_count; // Active TCP sessions
 extern std::mutex results_mutex;
 extern std::deque<PacketSummary> results_queue;
 extern const size_t MAX_RESULTS;
+
+// --- Conversation Timeline Model ---
+extern std::mutex timeline_mutex;
+extern std::map<std::string, ConversationTimelineEntry> conversation_timeline;
+extern const size_t MAX_TIMELINE_TRACKED;
 
 #endif // SNIFFER_H

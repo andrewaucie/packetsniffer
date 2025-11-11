@@ -22,6 +22,215 @@ namespace {
 
 // --- Helper Parser Functions (static) ---
 
+static std::map<std::string, std::string> timeline_direction_lookup;
+
+static std::string make_direction_key(const std::string& src_ip, uint16_t src_port,
+                                      const std::string& dst_ip, uint16_t dst_port) {
+    std::ostringstream oss;
+    oss << src_ip << ":" << src_port << "->" << dst_ip << ":" << dst_port;
+    return oss.str();
+}
+
+static std::string make_flow_label(const std::string& client_ip, uint16_t client_port,
+                                   const std::string& server_ip, uint16_t server_port) {
+    std::ostringstream oss;
+    oss << client_ip << ":" << client_port << " <-> "
+        << server_ip << ":" << server_port;
+    return oss.str();
+}
+
+static void register_direction_keys_locked(ConversationTimelineEntry& entry,
+                                           const std::string& canonical_key,
+                                           const std::string& client_ip,
+                                           uint16_t client_port,
+                                           const std::string& server_ip,
+                                           uint16_t server_port) {
+    std::string forward = make_direction_key(client_ip, client_port, server_ip, server_port);
+    std::string reverse = make_direction_key(server_ip, server_port, client_ip, client_port);
+
+    if (entry.forward_key != forward) {
+        if (!entry.forward_key.empty()) {
+            timeline_direction_lookup.erase(entry.forward_key);
+        }
+        entry.forward_key = forward;
+    }
+    if (entry.reverse_key != reverse) {
+        if (!entry.reverse_key.empty()) {
+            timeline_direction_lookup.erase(entry.reverse_key);
+        }
+        entry.reverse_key = reverse;
+    }
+
+    timeline_direction_lookup[entry.forward_key] = canonical_key;
+    timeline_direction_lookup[entry.reverse_key] = canonical_key;
+}
+
+static void prune_timeline_locked() {
+    while (conversation_timeline.size() > MAX_TIMELINE_TRACKED) {
+        std::map<std::string, ConversationTimelineEntry>::iterator victim = conversation_timeline.end();
+        for (std::map<std::string, ConversationTimelineEntry>::iterator it = conversation_timeline.begin();
+             it != conversation_timeline.end(); ++it) {
+            if (victim == conversation_timeline.end()) {
+                victim = it;
+                continue;
+            }
+
+            bool victim_closed = victim->second.closed;
+            bool candidate_closed = it->second.closed;
+
+            if (!victim_closed && candidate_closed) {
+                victim = it;
+                continue;
+            }
+
+            if (victim_closed == candidate_closed) {
+                if (timercmp(&it->second.last_ts, &victim->second.last_ts, <)) {
+                    victim = it;
+                }
+            }
+        }
+
+        if (victim == conversation_timeline.end()) {
+            break;
+        }
+
+        if (!victim->second.forward_key.empty()) {
+            timeline_direction_lookup.erase(victim->second.forward_key);
+        }
+        if (!victim->second.reverse_key.empty()) {
+            timeline_direction_lookup.erase(victim->second.reverse_key);
+        }
+
+        conversation_timeline.erase(victim);
+    }
+}
+
+static void update_conversation_timeline(const PacketSummary& summary,
+                                         const struct tcphdr* tcp_header,
+                                         unsigned int payload_len) {
+    if (summary.src_ip.empty() || summary.dst_ip.empty()) {
+        return;
+    }
+
+    uint16_t src_port = ntohs(tcp_header->th_sport);
+    uint16_t dst_port = ntohs(tcp_header->th_dport);
+
+    const bool syn_flag = (tcp_header->th_flags & TH_SYN) != 0;
+    const bool ack_flag = (tcp_header->th_flags & TH_ACK) != 0;
+    const bool fin_flag = (tcp_header->th_flags & TH_FIN) != 0;
+    const bool rst_flag = (tcp_header->th_flags & TH_RST) != 0;
+
+    struct timeval ts = summary.timestamp;
+
+    std::string dir_key = make_direction_key(summary.src_ip, src_port, summary.dst_ip, dst_port);
+
+    std::lock_guard<std::mutex> lock(timeline_mutex);
+
+    std::string canonical_key;
+    std::map<std::string, std::string>::iterator lookup = timeline_direction_lookup.find(dir_key);
+    if (lookup != timeline_direction_lookup.end()) {
+        canonical_key = lookup->second;
+        if (conversation_timeline.find(canonical_key) == conversation_timeline.end()) {
+            timeline_direction_lookup.erase(lookup);
+            canonical_key.clear();
+        }
+    }
+
+    bool created = false;
+    if (canonical_key.empty()) {
+        canonical_key = dir_key;
+        ConversationTimelineEntry entry = {};
+        entry.client_ip = summary.src_ip;
+        entry.client_port = src_port;
+        entry.server_ip = summary.dst_ip;
+        entry.server_port = dst_port;
+        entry.flow_label = make_flow_label(entry.client_ip, entry.client_port,
+                                           entry.server_ip, entry.server_port);
+        entry.start_ts = ts;
+        entry.last_ts = ts;
+        conversation_timeline[canonical_key] = entry;
+        ConversationTimelineEntry& entry_ref = conversation_timeline[canonical_key];
+        register_direction_keys_locked(entry_ref, canonical_key,
+                                       entry_ref.client_ip, entry_ref.client_port,
+                                       entry_ref.server_ip, entry_ref.server_port);
+        created = true;
+    }
+
+    ConversationTimelineEntry& entry = conversation_timeline[canonical_key];
+    entry.last_ts = ts;
+
+    const bool syn_only = syn_flag && !ack_flag;
+    const bool synack = syn_flag && ack_flag;
+    const bool pure_ack = ack_flag && !syn_flag && !fin_flag && !rst_flag && payload_len == 0;
+
+    auto update_roles = [&](const std::string& client_ip, uint16_t client_port,
+                            const std::string& server_ip, uint16_t server_port) {
+        if (entry.client_ip == client_ip && entry.client_port == client_port &&
+            entry.server_ip == server_ip && entry.server_port == server_port) {
+            return;
+        }
+        entry.client_ip = client_ip;
+        entry.client_port = client_port;
+        entry.server_ip = server_ip;
+        entry.server_port = server_port;
+        entry.flow_label = make_flow_label(client_ip, client_port, server_ip, server_port);
+        register_direction_keys_locked(entry, canonical_key,
+                                       entry.client_ip, entry.client_port,
+                                       entry.server_ip, entry.server_port);
+    };
+
+    if (syn_only) {
+        update_roles(summary.src_ip, src_port, summary.dst_ip, dst_port);
+        if (!entry.syn_seen) {
+            entry.syn_seen = true;
+            entry.syn_ts = ts;
+            entry.start_ts = ts;
+        }
+    } else if (synack) {
+        update_roles(summary.dst_ip, dst_port, summary.src_ip, src_port);
+        if (!entry.synack_seen) {
+            entry.synack_seen = true;
+            entry.synack_ts = ts;
+        }
+    } else if (entry.client_ip.empty()) {
+        update_roles(summary.src_ip, src_port, summary.dst_ip, dst_port);
+        if (entry.start_ts.tv_sec == 0 && entry.start_ts.tv_usec == 0) {
+            entry.start_ts = ts;
+        }
+    }
+
+    bool is_client_to_server = (summary.src_ip == entry.client_ip && src_port == entry.client_port);
+
+    if (pure_ack && entry.syn_seen && entry.synack_seen && !entry.ack_seen && is_client_to_server) {
+        entry.ack_seen = true;
+        entry.ack_ts = ts;
+    }
+
+    if (payload_len > 0) {
+        if (is_client_to_server) {
+            entry.bytes_c2s += payload_len;
+            if (!entry.first_payload_c2s_seen) {
+                entry.first_payload_c2s_seen = true;
+                entry.first_payload_c2s_ts = ts;
+            }
+        } else {
+            entry.bytes_s2c += payload_len;
+            if (!entry.first_payload_s2c_seen) {
+                entry.first_payload_s2c_seen = true;
+                entry.first_payload_s2c_ts = ts;
+            }
+        }
+    }
+
+    if ((fin_flag || rst_flag) && !entry.closed) {
+        entry.closed = true;
+        entry.close_ts = ts;
+    }
+
+    if (created) {
+        prune_timeline_locked();
+    }
+}
 /**
  * @brief Helper to format a MAC address to a string.
  */
@@ -80,6 +289,8 @@ static void handle_tcp_packet(const u_char *l4_payload, unsigned int l4_len, Pac
     tuple.sport = tcp_header->th_sport;
     tuple.dport = tcp_header->th_dport;
     uint32_t seq_num = ntohl(tcp_header->th_seq);
+
+    update_conversation_timeline(summary, tcp_header, payload_len);
 
     if (payload_len > 0) {
         // We have data, add the reassembly summary to the flags

@@ -45,6 +45,11 @@ std::mutex results_mutex;
 std::deque<PacketSummary> results_queue;
 const size_t MAX_RESULTS = 100;
 
+// --- Conversation Timeline ---
+std::mutex timeline_mutex;
+std::map<std::string, ConversationTimelineEntry> conversation_timeline;
+const size_t MAX_TIMELINE_TRACKED = 64;
+
 
 // --- TUI UI Windows ---
 WINDOW *stats_win = nullptr;
@@ -52,6 +57,7 @@ WINDOW *pcap_win = nullptr;
 WINDOW *bandwidth_win = nullptr;
 WINDOW *talkers_win = nullptr;
 WINDOW *main_win = nullptr;
+WINDOW *timeline_win = nullptr;
 
 namespace {
 std::string human_readable_bytes(double bytes) {
@@ -76,6 +82,47 @@ std::string human_readable_bytes(double bytes) {
 
 std::string human_readable_rate(double bytes_per_second) {
     return human_readable_bytes(bytes_per_second) + "/s";
+}
+
+bool is_time_set(const struct timeval& tv) {
+    return tv.tv_sec != 0 || tv.tv_usec != 0;
+}
+
+double compute_diff_ms(const struct timeval& start, const struct timeval& end) {
+    if (!is_time_set(start) || !is_time_set(end)) {
+        return -1.0;
+    }
+    double diff = static_cast<double>(end.tv_sec - start.tv_sec) * 1000.0;
+    diff += static_cast<double>(end.tv_usec - start.tv_usec) / 1000.0;
+    return (diff >= 0.0) ? diff : -1.0;
+}
+
+std::string format_duration_string(double ms) {
+    if (ms < 0.0) {
+        return "--";
+    }
+
+    std::ostringstream oss;
+    if (ms >= 1000.0) {
+        double seconds = ms / 1000.0;
+        if (seconds >= 100.0) {
+            oss << std::fixed << std::setprecision(0);
+        } else {
+            oss << std::fixed << std::setprecision(1);
+        }
+        oss << seconds << "s";
+        return oss.str();
+    }
+
+    if (ms >= 100.0) {
+        oss << std::fixed << std::setprecision(0);
+    } else if (ms >= 10.0) {
+        oss << std::fixed << std::setprecision(1);
+    } else {
+        oss << std::fixed << std::setprecision(2);
+    }
+    oss << ms << "ms";
+    return oss.str();
 }
 } // namespace
 
@@ -200,27 +247,42 @@ void configure_windows(int screen_h, int screen_w) {
     if (talkers_w > screen_w - 30) talkers_w = screen_w - 30;
     if (talkers_w < 1) talkers_w = 1;
 
-    int main_width = screen_w - talkers_w;
-    if (main_width < 30 && screen_w > 50) {
-        main_width = 30;
-        talkers_w = screen_w - main_width;
+    int right_width = screen_w - talkers_w;
+    if (right_width < 40 && screen_w > 60) {
+        right_width = 40;
+        talkers_w = screen_w - right_width;
     }
-    if (main_width < 1) {
-        main_width = std::max(1, screen_w / 2);
-        talkers_w = screen_w - main_width;
+    if (right_width < 1) {
+        right_width = std::max(1, screen_w / 2);
+        talkers_w = screen_w - right_width;
+    }
+
+    int timeline_h = bottom_h / 3;
+    if (timeline_h < 3 && bottom_h >= 6) timeline_h = 3;
+    if (timeline_h < 1) timeline_h = 1;
+    int main_height = bottom_h - timeline_h;
+    if (main_height < 3 && bottom_h >= 6) {
+        main_height = 3;
+        timeline_h = bottom_h - main_height;
+    }
+    if (main_height < 1) {
+        main_height = std::max(1, bottom_h / 2);
+        timeline_h = bottom_h - main_height;
     }
 
     if (stats_win) delwin(stats_win);
     if (pcap_win) delwin(pcap_win);
     if (bandwidth_win) delwin(bandwidth_win);
     if (talkers_win) delwin(talkers_win);
+    if (timeline_win) delwin(timeline_win);
     if (main_win) delwin(main_win);
 
     stats_win = newwin(top_h, stats_w, 0, 0);
     pcap_win = newwin(top_h, pcap_w, 0, stats_w);
     bandwidth_win = newwin(top_h, bandwidth_w_width, 0, stats_w + pcap_w);
     talkers_win = newwin(bottom_h, talkers_w, top_h, 0);
-    main_win = newwin(bottom_h, main_width, top_h, talkers_w);
+    timeline_win = newwin(timeline_h, right_width, top_h, talkers_w);
+    main_win = newwin(main_height, right_width, top_h + timeline_h, talkers_w);
 }
 
 /**
@@ -239,6 +301,7 @@ void signal_handler(int signum) {
         if (pcap_win) wrefresh(pcap_win);
         if (bandwidth_win) wrefresh(bandwidth_win);
         if (talkers_win) wrefresh(talkers_win);
+        if (timeline_win) wrefresh(timeline_win);
     }
 }
 
@@ -425,6 +488,129 @@ void draw_top_talkers_window() {
     wrefresh(talkers_win);
 }
 
+void draw_timeline_window() {
+    if (!timeline_win) return;
+    box(timeline_win, 0, 0);
+    mvwprintw(timeline_win, 0, 2, " Conversation Timeline ");
+
+    int max_y, max_x;
+    getmaxyx(timeline_win, max_y, max_x);
+
+    int row = 2;
+
+    std::vector<ConversationTimelineEntry> entries;
+    {
+        std::lock_guard<std::mutex> lock(timeline_mutex);
+        entries.reserve(conversation_timeline.size());
+        for (std::map<std::string, ConversationTimelineEntry>::const_iterator it = conversation_timeline.begin();
+             it != conversation_timeline.end(); ++it) {
+            entries.push_back(it->second);
+        }
+    }
+
+    std::sort(entries.begin(), entries.end(),
+              [](const ConversationTimelineEntry& a, const ConversationTimelineEntry& b) {
+                  if (a.last_ts.tv_sec == b.last_ts.tv_sec) {
+                      return a.last_ts.tv_usec > b.last_ts.tv_usec;
+                  }
+                  return a.last_ts.tv_sec > b.last_ts.tv_sec;
+              });
+
+    if (entries.empty()) {
+        if (row < max_y - 1) {
+            mvwprintw(timeline_win, row, 2, "No TCP conversations tracked yet.");
+        }
+        wrefresh(timeline_win);
+        return;
+    }
+
+    const int handshake_width = 9;
+    const int response_width = 9;
+    const int duration_width = 9;
+    const int up_width = 12;
+    const int down_width = 12;
+    const int state_width = 10;
+    const int spacing = 6; // spaces between columns
+
+    int flow_width = max_x - 4 - (handshake_width + response_width + duration_width +
+                                  up_width + down_width + state_width + spacing);
+    if (flow_width < 12) flow_width = 12;
+
+    if (row < max_y - 1) {
+        std::vector<char> header(max_x + 1, 0);
+        snprintf(header.data(), max_x,
+                 "%-*s %-*s %-*s %-*s %-*s %-*s %-*s",
+                 flow_width, "Flow",
+                 handshake_width, "Hndshk",
+                 response_width, "Resp",
+                 duration_width, "Dur",
+                 up_width, "Up Bytes",
+                 down_width, "Down Bytes",
+                 state_width, "State");
+        mvwprintw(timeline_win, row++, 2, "%s", header.data());
+    }
+
+    for (std::vector<ConversationTimelineEntry>::const_iterator it = entries.begin();
+         it != entries.end() && row < max_y - 1; ++it) {
+        const ConversationTimelineEntry& entry = *it;
+
+        double handshake_ms = -1.0;
+        if (entry.syn_seen && entry.ack_seen) {
+            handshake_ms = compute_diff_ms(entry.syn_ts, entry.ack_ts);
+        } else if (entry.syn_seen && entry.synack_seen) {
+            handshake_ms = compute_diff_ms(entry.syn_ts, entry.synack_ts);
+        }
+
+        double first_response_ms = -1.0;
+        if (entry.first_payload_c2s_seen && entry.first_payload_s2c_seen) {
+            first_response_ms = compute_diff_ms(entry.first_payload_c2s_ts, entry.first_payload_s2c_ts);
+        }
+
+        double duration_ms = -1.0;
+        if (is_time_set(entry.start_ts)) {
+            if (entry.closed && is_time_set(entry.close_ts)) {
+                duration_ms = compute_diff_ms(entry.start_ts, entry.close_ts);
+            } else {
+                duration_ms = compute_diff_ms(entry.start_ts, entry.last_ts);
+            }
+        }
+
+        std::string handshake_str = format_duration_string(handshake_ms);
+        std::string response_str = format_duration_string(first_response_ms);
+        std::string duration_str = format_duration_string(duration_ms);
+        std::string up_str = human_readable_bytes(static_cast<double>(entry.bytes_c2s));
+        std::string down_str = human_readable_bytes(static_cast<double>(entry.bytes_s2c));
+
+        std::string state;
+        if (entry.closed) {
+            state = "Closed";
+        } else if (entry.first_payload_s2c_seen || entry.first_payload_c2s_seen) {
+            state = "Streaming";
+        } else if (entry.syn_seen && entry.ack_seen) {
+            state = "Established";
+        } else if (entry.syn_seen) {
+            state = "Syn-Sent";
+        } else {
+            state = "Observed";
+        }
+
+        std::vector<char> line(max_x + 1, 0);
+        snprintf(line.data(), max_x,
+                 "%-*.*s %-*s %-*s %-*s %-*s %-*s %-*s",
+                 flow_width, flow_width, entry.flow_label.c_str(),
+                 handshake_width, handshake_str.c_str(),
+                 response_width, response_str.c_str(),
+                 duration_width, duration_str.c_str(),
+                 up_width, up_str.c_str(),
+                 down_width, down_str.c_str(),
+                 state_width, state.c_str());
+
+        mvwprintw(timeline_win, row++, 2, "%s", line.data());
+    }
+
+    wrefresh(timeline_win);
+}
+
 void draw_main_window() {
     if (!main_win) return;
     box(main_win, 0, 0);
@@ -520,12 +706,14 @@ void ui_loop() {
         if (pcap_win) werase(pcap_win);
         if (bandwidth_win) werase(bandwidth_win);
         if (talkers_win) werase(talkers_win);
+        if (timeline_win) werase(timeline_win);
         if (main_win) werase(main_win);
 
         draw_stats_window();
         draw_pcap_window();
         draw_bandwidth_window();
         draw_top_talkers_window();
+        draw_timeline_window();
         draw_main_window();
 
         refresh();

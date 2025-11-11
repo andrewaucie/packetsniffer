@@ -8,6 +8,7 @@ This project is a multithreaded, ncurses-driven packet sniffer that ingests live
 - **Threaded capture pipeline** – dedicated producer thread feeds a worker pool (`-t <threads>` or auto-detected) so parsing keeps up with busy links without dropping packets.
 - **Deep protocol coverage** – Ethernet (incl. 802.1Q), IPv4/IPv6, ARP, TCP, UDP, ICMP/ICMPv6, DNS decoding, and HTTP request/response extraction.
 - **Stateful TCP reassembly** – rebuilds byte streams bidirectionally, handles out-of-order segments, and prints each conversation once FIN/RST is observed.
+- **Conversation timeline** – per-flow view of handshake latency, first-response time, byte balance (client vs. server), and live/closed state.
 - **Flexible sources & filters** – capture from an interface (`-i`) or offline file (`-r`), apply standard BPF expressions (`-f "tcp port 80"`), and optionally stop after N packets (`-c`).
 - **Operational safeguards** – graceful shutdown on `q`/`Ctrl+C`, defensive ncurses initialization (TERM validation, sudo preservation), and real-time visibility into drops and queue depth.
 
@@ -89,6 +90,7 @@ Press `q` inside the UI to stop gracefully. `Ctrl+C` is also handled, ensuring n
 - **Protocol Stats** – running counts per L2/L3/L4/L7 classification (`Ethernet`, `IPv6`, `TCP`, `HTTP`, etc.).
 - **Capture Stats** – libpcap totals (received, processed, dropped) and current queue size for back-pressure visibility.
 - **Live Bandwidth** – smoothed bytes-per-second meter with human-readable units.
+- **Conversation Timeline** – highlights recent TCP flows with handshake time, first-response latency, byte totals (up/down), and connection state.
 - **Top Talkers** – rolling leaderboard of IPs producing the most traffic, independent of protocol.
 - **Packet Log** – tail of detailed packet summaries and reassembly output; updated continuously.
 
