@@ -97,8 +97,9 @@ Press `q` inside the UI to stop gracefully. `Ctrl+C` is also handled, ensuring n
 Resize the terminal to allocate more space to the sections you care about. The layout recomputes each pass of the UI loop.
 
 ## Architecture Overview
-- `src/app.cpp` / `include/app.hpp` – main entry point, CLI parsing, ncurses lifecycle, producer thread (`pcap_loop`), and worker pool orchestration.
-- `src/parsers.cpp` / `include/parsers.hpp` – protocol decoding routines used by the workers; updates statistics and composes `PacketSummary` records.
+- `src/main.cpp` – main entry point, CLI parsing, and thread orchestration.
+- `src/core.cpp` / `include/core.hpp` – packet capture pipeline (producer/consumer), protocol decoding (L2-L7), timeline tracking, and shared application state.
+- `src/ui.cpp` / `include/ui.hpp` – ncurses lifecycle, window management, and all rendering functions.
 - `src/reassembly.cpp` / `include/reassembly.hpp` – TCP state tracking via `ConnectionTuple` and `ConnectionData`, buffering segments until FIN/RST, then flushing the reconstructed stream.
 
 The pipeline follows a classical producer/consumer pattern:

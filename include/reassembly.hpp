@@ -10,7 +10,7 @@
 #ifndef REASSEMBLY_HPP
 #define REASSEMBLY_HPP
 
-#include "app.hpp" // Includes all our types and headers
+#include "core.hpp"
 
 /**
  * @struct ConnectionTuple
@@ -36,7 +36,9 @@ public:
 };
 
 // --- Global Session Manager ---
+/** @brief Map storing TCP reassembly data for all active connections */
 extern std::map<ConnectionTuple, ConnectionData> tcp_sessions;
+/** @brief Mutex protecting tcp_sessions map */
 extern std::mutex session_mutex;
 
 // --- Function Declarations ---
@@ -48,7 +50,7 @@ extern std::mutex session_mutex;
  */
 std::string handle_tcp_reassembly(
     const u_char *payload,
-    unsigned int payload_len, // Changed to unsigned int
+    unsigned int payload_len,
     uint32_t seq_num,
     ConnectionTuple tuple
 );
@@ -60,6 +62,5 @@ std::string handle_tcp_reassembly(
  * @return A PacketSummary struct describing the closed stream.
  */
 PacketSummary handle_stream_close(ConnectionTuple tuple);
-
 
 #endif // REASSEMBLY_HPP

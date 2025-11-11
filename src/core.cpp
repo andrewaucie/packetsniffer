@@ -1,50 +1,101 @@
 /*
- * parsers.cpp
+ * core.cpp
  *
- * Defines the main producer/consumer logic and all
- * the L2-L7 helper functions for parsing.
- *
- * This file implements the core of the multithreaded
- * architecture.
+ * Core packet capture, processing, and timeline tracking.
+ * Implements the producer/consumer pipeline and all parsing logic.
  */
 
-#include "parsers.hpp"
-#include "app.hpp"
-#include "reassembly.hpp" // For TCP reassembly
+#include "core.hpp"
+#include "reassembly.hpp"
+#include <algorithm>
+
+// --- Global Variable Definitions ---
+pcap_t *g_handle = NULL;
+std::atomic<bool> shutting_down(false);
+std::string g_pcap_error = "";
+
+// --- Producer-Consumer Queue Components ---
+std::queue<QueuedPacket> packet_queue;
+std::mutex queue_mutex;
+std::condition_variable queue_cond;
+
+// --- Statistics Model ---
+std::mutex stats_mutex;
+std::map<std::string, long> stats_map;
+std::map<std::string, long> ip_stats_map;
+struct pcap_stat g_pcap_stats;
+std::atomic<unsigned long> packets_processed(0);
+std::atomic<unsigned long long> total_bytes(0);
+std::atomic<long> tcp_session_count(0);
+
+// --- Results Model ---
+std::mutex results_mutex;
+std::deque<PacketSummary> results_queue;
+const size_t MAX_RESULTS = 100;
+
+// --- Conversation Timeline ---
+std::mutex timeline_mutex;
+std::map<std::string, ConversationTimelineEntry> conversation_timeline;
+const size_t MAX_TIMELINE_TRACKED = 64;
 
 // Thread-safe atomic packet counter
-// This is 'static' so it is local *only* to this file.
 static std::atomic<int> packet_id(1);
 
-// Anonymous namespace for static helper functions
-// This restricts their scope to this file, which is good practice.
-namespace {
-
-// --- Helper Parser Functions (static) ---
-
+// Timeline direction lookup
 static std::map<std::string, std::string> timeline_direction_lookup;
 
-static std::string make_direction_key(const std::string& src_ip, uint16_t src_port,
-                                      const std::string& dst_ip, uint16_t dst_port) {
+// --- Helper Functions ---
+
+namespace {
+
+/**
+ * @brief Converts a MAC address to a human-readable string format.
+ * @param addr Pointer to 6-byte MAC address
+ * @return String in format "XX:XX:XX:XX:XX:XX"
+ */
+std::string mac_to_string(const u_char *addr) {
+    std::stringstream ss;
+    ss << std::hex << std::setfill('0');
+    for (int i = 0; i < 6; ++i) {
+        ss << std::setw(2) << static_cast<int>(addr[i]);
+        if (i < 5) ss << ":";
+    }
+    return ss.str();
+}
+
+/**
+ * @brief Creates a directional key for timeline tracking.
+ * @return String in format "src_ip:src_port->dst_ip:dst_port"
+ */
+std::string make_direction_key(const std::string& src_ip, uint16_t src_port,
+                                const std::string& dst_ip, uint16_t dst_port) {
     std::ostringstream oss;
     oss << src_ip << ":" << src_port << "->" << dst_ip << ":" << dst_port;
     return oss.str();
 }
 
-static std::string make_flow_label(const std::string& client_ip, uint16_t client_port,
-                                   const std::string& server_ip, uint16_t server_port) {
+/**
+ * @brief Creates a bidirectional flow label for display.
+ * @return String in format "client_ip:client_port <-> server_ip:server_port"
+ */
+std::string make_flow_label(const std::string& client_ip, uint16_t client_port,
+                             const std::string& server_ip, uint16_t server_port) {
     std::ostringstream oss;
     oss << client_ip << ":" << client_port << " <-> "
         << server_ip << ":" << server_port;
     return oss.str();
 }
 
-static void register_direction_keys_locked(ConversationTimelineEntry& entry,
-                                           const std::string& canonical_key,
-                                           const std::string& client_ip,
-                                           uint16_t client_port,
-                                           const std::string& server_ip,
-                                           uint16_t server_port) {
+/**
+ * @brief Registers bidirectional keys for timeline lookup.
+ * Updates the global timeline_direction_lookup map. Must be called with timeline_mutex held.
+ */
+void register_direction_keys_locked(ConversationTimelineEntry& entry,
+                                     const std::string& canonical_key,
+                                     const std::string& client_ip,
+                                     uint16_t client_port,
+                                     const std::string& server_ip,
+                                     uint16_t server_port) {
     std::string forward = make_direction_key(client_ip, client_port, server_ip, server_port);
     std::string reverse = make_direction_key(server_ip, server_port, client_ip, client_port);
 
@@ -65,7 +116,11 @@ static void register_direction_keys_locked(ConversationTimelineEntry& entry,
     timeline_direction_lookup[entry.reverse_key] = canonical_key;
 }
 
-static void prune_timeline_locked() {
+/**
+ * @brief Removes oldest/closed conversations when the timeline exceeds MAX_TIMELINE_TRACKED.
+ * Prefers to remove closed conversations first, then oldest by last_ts. Must be called with timeline_mutex held.
+ */
+void prune_timeline_locked() {
     while (conversation_timeline.size() > MAX_TIMELINE_TRACKED) {
         std::map<std::string, ConversationTimelineEntry>::iterator victim = conversation_timeline.end();
         for (std::map<std::string, ConversationTimelineEntry>::iterator it = conversation_timeline.begin();
@@ -105,9 +160,13 @@ static void prune_timeline_locked() {
     }
 }
 
-static void update_conversation_timeline(const PacketSummary& summary,
-                                         const struct tcphdr* tcp_header,
-                                         unsigned int payload_len) {
+/**
+ * @brief Updates conversation timeline with TCP packet information.
+ * Tracks handshake timing, payload direction, and connection state.
+ */
+void update_conversation_timeline(const PacketSummary& summary,
+                                   const struct tcphdr* tcp_header,
+                                   unsigned int payload_len) {
     if (summary.src_ip.empty() || summary.dst_ip.empty()) {
         return;
     }
@@ -231,23 +290,11 @@ static void update_conversation_timeline(const PacketSummary& summary,
         prune_timeline_locked();
     }
 }
-/**
- * @brief Helper to format a MAC address to a string.
- */
-static std::string mac_to_string(const u_char *addr) {
-    std::stringstream ss;
-    ss << std::hex << std::setfill('0');
-    for (int i = 0; i < 6; ++i) {
-        ss << std::setw(2) << static_cast<int>(addr[i]);
-        if (i < 5) ss << ":";
-    }
-    return ss.str();
-}
 
 /**
- * @brief L7 Parser for DNS. Populates the info string.
+ * @brief Extracts basic DNS header information and populates the summary.
  */
-static void parse_dns(const u_char *payload, unsigned int len, PacketSummary& summary) {
+void parse_dns(const u_char *payload, unsigned int len, PacketSummary& summary) {
     if (len < static_cast<unsigned int>(sizeof(simple_dnshdr))) return;
     const struct simple_dnshdr *dns_header = (const struct simple_dnshdr *)payload;
     
@@ -259,16 +306,15 @@ static void parse_dns(const u_char *payload, unsigned int len, PacketSummary& su
 }
 
 /**
- * @brief L4 Parser for TCP packets. Populates the summary.
+ * @brief Processes TCP packet: extracts ports, flags, payload, and manages reassembly.
  */
-static void handle_tcp_packet(const u_char *l4_payload, unsigned int l4_len, PacketSummary& summary) {
-    if (l4_len < static_cast<unsigned int>(sizeof(tcphdr))) return; 
+void handle_tcp_packet(const u_char *l4_payload, unsigned int l4_len, PacketSummary& summary) {
+    if (l4_len < static_cast<unsigned int>(sizeof(tcphdr))) return;
     const struct tcphdr *tcp_header = (const struct tcphdr *)(l4_payload);
     
     summary.src_port = std::to_string(ntohs(tcp_header->th_sport));
     summary.dst_port = std::to_string(ntohs(tcp_header->th_dport));
 
-    // Get flags
     std::string flags = "";
     if (tcp_header->th_flags & TH_SYN) flags += "SYN ";
     if (tcp_header->th_flags & TH_ACK) flags += "ACK ";
@@ -276,9 +322,8 @@ static void handle_tcp_packet(const u_char *l4_payload, unsigned int l4_len, Pac
     if (tcp_header->th_flags & TH_RST) flags += "RST ";
     if (tcp_header->th_flags & TH_PUSH) flags += "PSH ";
 
-    // --- Reassembly Logic ---
     unsigned int tcp_header_size = tcp_header->th_off * 4;
-    if (tcp_header_size < 20 || tcp_header_size > l4_len) return; 
+    if (tcp_header_size < 20 || tcp_header_size > l4_len) return;
     
     unsigned int payload_offset = tcp_header_size;
     unsigned int payload_len = l4_len - payload_offset;
@@ -293,16 +338,13 @@ static void handle_tcp_packet(const u_char *l4_payload, unsigned int l4_len, Pac
     update_conversation_timeline(summary, tcp_header, payload_len);
 
     if (payload_len > 0) {
-        // We have data, add the reassembly summary to the flags
         flags += handle_tcp_reassembly(l4_payload + payload_offset, payload_len, seq_num, tuple);
     }
-    summary.info = flags; // Set the final info string
+    summary.info = flags;
 
     if (tcp_header->th_flags & (TH_FIN | TH_RST)) {
-        // Stream is closing. Get the summary and push *it*
-        // to the results queue as a separate event.
         PacketSummary stream_summary = handle_stream_close(tuple);
-        stream_summary.id = packet_id++; // Use the atomic counter
+        stream_summary.id = packet_id++;
         
         std::lock_guard<std::mutex> lock(results_mutex);
         results_queue.push_back(std::move(stream_summary));
@@ -313,16 +355,15 @@ static void handle_tcp_packet(const u_char *l4_payload, unsigned int l4_len, Pac
 }
 
 /**
- * @brief L4 Parser for UDP packets. Populates the summary.
+ * @brief Processes UDP packet: extracts ports and attempts DNS parsing if applicable.
  */
-static void handle_udp_packet(const u_char *l4_payload, unsigned int l4_len, PacketSummary& summary) {
-    if (l4_len < static_cast<unsigned int>(sizeof(udphdr))) return; 
+void handle_udp_packet(const u_char *l4_payload, unsigned int l4_len, PacketSummary& summary) {
+    if (l4_len < static_cast<unsigned int>(sizeof(udphdr))) return;
     const struct udphdr *udp_header = (const struct udphdr *)(l4_payload);
     
     summary.src_port = std::to_string(ntohs(udp_header->uh_sport));
     summary.dst_port = std::to_string(ntohs(udp_header->uh_dport));
 
-    // L7 DNS Hook
     if (summary.src_port == "53" || summary.dst_port == "53") {
         unsigned int payload_offset = sizeof(udphdr);
         unsigned int payload_len = l4_len - payload_offset;
@@ -331,10 +372,10 @@ static void handle_udp_packet(const u_char *l4_payload, unsigned int l4_len, Pac
 }
 
 /**
- * @brief L3 Parser for ARP packets. Populates the summary.
+ * @brief Processes ARP packet: extracts operation type and addresses.
  */
-static void handle_arp_packet(const u_char *l3_payload, unsigned int l3_len, PacketSummary& summary) {
-    if (l3_len < static_cast<unsigned int>(sizeof(my_arphdr))) return; 
+void handle_arp_packet(const u_char *l3_payload, unsigned int l3_len, PacketSummary& summary) {
+    if (l3_len < static_cast<unsigned int>(sizeof(my_arphdr))) return;
     const struct my_arphdr *arp_header = (const struct my_arphdr *)l3_payload;
 
     uint16_t op = ntohs(arp_header->oper);
@@ -346,18 +387,18 @@ static void handle_arp_packet(const u_char *l3_payload, unsigned int l3_len, Pac
     summary.src_ip = spa_str;
     summary.dst_ip = tpa_str;
     
-    if (op == 1) { // Request
+    if (op == 1) {
         summary.info = "Request: Who has " + std::string(tpa_str) + "? Tell " + std::string(spa_str);
-    } else if (op == 2) { // Reply
+    } else if (op == 2) {
         summary.info = "Reply: " + std::string(spa_str) + " is at " + mac_to_string(arp_header->sha);
     }
 }
 
 /**
- * @brief L3 Parser for IPv4 packets. Populates the summary.
+ * @brief Processes IPv4 packet: extracts addresses, TTL, and dispatches to L4 handlers.
  */
-static void handle_ipv4_packet(const u_char *l3_payload, unsigned int l3_len, PacketSummary& summary) {
-    if (l3_len < static_cast<unsigned int>(sizeof(ip))) return; 
+void handle_ipv4_packet(const u_char *l3_payload, unsigned int l3_len, PacketSummary& summary) {
+    if (l3_len < static_cast<unsigned int>(sizeof(ip))) return;
     const struct ip *ip_header = (const struct ip *)(l3_payload);
 
     char src_ip_str[INET_ADDRSTRLEN];
@@ -366,13 +407,13 @@ static void handle_ipv4_packet(const u_char *l3_payload, unsigned int l3_len, Pa
     inet_ntop(AF_INET, &(ip_header->ip_dst), dst_ip_str, INET_ADDRSTRLEN);
     summary.src_ip = src_ip_str;
     summary.dst_ip = dst_ip_str;
-    summary.ttl = ip_header->ip_ttl; // Extract TTL
+    summary.ttl = ip_header->ip_ttl;
 
     unsigned int ip_header_size = ip_header->ip_hl * 4;
-    if (ip_header_size < 20) return; // Basic validation
+    if (ip_header_size < 20) return;
 
     unsigned int l4_offset = ip_header_size;
-    if (l4_offset > l3_len) return; // Check for malformed packet
+    if (l4_offset > l3_len) return;
     unsigned int l4_len = l3_len - l4_offset;
     const u_char *l4_payload = l3_payload + l4_offset;
     
@@ -396,10 +437,10 @@ static void handle_ipv4_packet(const u_char *l3_payload, unsigned int l3_len, Pa
 }
 
 /**
- * @brief L3 Parser for IPv6 packets. Populates the summary.
+ * @brief Processes IPv6 packet: extracts addresses, handles extension headers, and dispatches to L4 handlers.
  */
-static void handle_ipv6_packet(const u_char *l3_payload, unsigned int l3_len, PacketSummary& summary) {
-    if (l3_len < static_cast<unsigned int>(sizeof(ip6_hdr))) return; 
+void handle_ipv6_packet(const u_char *l3_payload, unsigned int l3_len, PacketSummary& summary) {
+    if (l3_len < static_cast<unsigned int>(sizeof(ip6_hdr))) return;
     const struct ip6_hdr *ip6_header = (const struct ip6_hdr *)(l3_payload);
 
     char src_ip6[INET6_ADDRSTRLEN];
@@ -408,7 +449,7 @@ static void handle_ipv6_packet(const u_char *l3_payload, unsigned int l3_len, Pa
     inet_ntop(AF_INET6, &(ip6_header->ip6_dst), dst_ip6, INET6_ADDRSTRLEN);
     summary.src_ip = src_ip6;
     summary.dst_ip = dst_ip6;
-    summary.ttl = ip6_header->ip6_hlim; // Extract hop limit (IPv6 equivalent of TTL)
+    summary.ttl = ip6_header->ip6_hlim;
 
     int next_header_type = ip6_header->ip6_nxt;
     unsigned int l4_offset = sizeof(struct ip6_hdr);
@@ -417,11 +458,11 @@ static void handle_ipv6_packet(const u_char *l3_payload, unsigned int l3_len, Pa
            next_header_type == IPPROTO_FRAGMENT || next_header_type == IPPROTO_DSTOPTS ||
            next_header_type == IPPROTO_AH || next_header_type == IPPROTO_ESP) {
         
-        if (l3_len < l4_offset + 2) break; 
+        if (l3_len < l4_offset + 2) break;
         next_header_type = (int)l3_payload[l4_offset];
         int header_len = (int)l3_payload[l4_offset + 1];
         l4_offset += (header_len * 8) + 8;
-        if (l4_offset > l3_len) break; 
+        if (l4_offset > l3_len) break;
     }
     
     unsigned int l4_len = l3_len - l4_offset;
@@ -447,22 +488,19 @@ static void handle_ipv6_packet(const u_char *l3_payload, unsigned int l3_len, Pa
 }
 
 /**
- * @brief Main packet processing function, called by a consumer.
- * This is the root of the parsing logic.
- * @param header pcap metadata
- * @param packet Raw packet data
- * @return A PacketSummary struct containing the parsed results.
+ * @brief Main packet processing function: parses L2 headers and dispatches to L3 handlers.
+ * @return PacketSummary struct containing all extracted packet information
  */
-static PacketSummary process_packet(const struct pcap_pkthdr *header, const u_char *packet) {
+PacketSummary process_packet(const struct pcap_pkthdr *header, const u_char *packet) {
     PacketSummary summary;
-    summary.id = packet_id++; // Atomically increment and assign
+    summary.id = packet_id++;
     summary.len = header->caplen;
-    summary.timestamp = header->ts; // Store packet timestamp
-    summary.ttl = 0; // Initialize TTL
+    summary.timestamp = header->ts;
+    summary.ttl = 0;
 
     const struct ether_header *eth_header = (const struct ether_header *)packet;
     uint16_t ether_type = ntohs(eth_header->ether_type);
-    unsigned int l3_offset = sizeof(struct ether_header); 
+    unsigned int l3_offset = sizeof(struct ether_header);
 
     if (ether_type == ETHERTYPE_VLAN) {
         ether_type = ntohs(*(uint16_t *)(packet + l3_offset + 2));
@@ -473,7 +511,7 @@ static PacketSummary process_packet(const struct pcap_pkthdr *header, const u_ch
         summary.info = "Malformed L2 Header";
         return summary;
     }
-    unsigned int l3_len = header->caplen - l3_offset; 
+    unsigned int l3_len = header->caplen - l3_offset;
     const u_char *l3_payload = packet + l3_offset;
 
     switch (ether_type) {
@@ -496,17 +534,20 @@ static PacketSummary process_packet(const struct pcap_pkthdr *header, const u_ch
     return summary;
 }
 
-// Close the anonymous namespace
+} // namespace
+
+// --- Public Functions ---
+
+void signal_handler(int signum) {
+    if (signum == SIGINT) {
+        shutting_down = true;
+        if (g_handle) pcap_breakloop(g_handle);
+        queue_cond.notify_all();
+    }
 }
 
-
-// --- Producer/Consumer Functions (Public) ---
-
-/**
- * @brief The PRODUCER callback. Called by pcap_loop.
- */
 void producer_callback(u_char *user_data, const struct pcap_pkthdr *header, const u_char *packet) {
-    (void)user_data; // Mark as unused to silence -Wunused-parameter
+    (void)user_data;
 
     QueuedPacket qp;
     qp.header = *header;
@@ -518,20 +559,7 @@ void producer_callback(u_char *user_data, const struct pcap_pkthdr *header, cons
     queue_cond.notify_one();
 }
 
-/**
- * @brief The CONSUMER loop. Run by all worker threads.
- */
 void consumer_thread_loop() {
-    
-    // {
-    //     // Use stringstream for thread-safe startup message
-    //     std::stringstream ss;
-    //     ss << "[Worker thread " << std::this_thread::get_id() << " started]" << std::endl;
-    //     // Lock only when printing
-    //     std::lock_guard<std::mutex> lock(stats_mutex); // Use stats_mutex, it's shared
-    //     std::cout << ss.str();
-    // }
-    
     while (true) {
         QueuedPacket packet_to_process;
         {
@@ -546,15 +574,12 @@ void consumer_thread_loop() {
             packet_queue.pop();
         }
 
-        // --- 1. Process Packet ---
         PacketSummary summary = process_packet(&packet_to_process.header, packet_to_process.data.data());
         unsigned int packet_len = packet_to_process.header.caplen;
 
-        // --- 2. Increment processed packet counter ---
         packets_processed++;
         total_bytes.fetch_add(packet_len, std::memory_order_relaxed);
 
-        // --- 3. Update Model ---
         {
             std::lock_guard<std::mutex> lock(stats_mutex);
             stats_map[summary.l3_protocol]++;
@@ -577,33 +602,28 @@ void consumer_thread_loop() {
             }
         }
     }
-
-    // {
-    //     // Use stringstream for thread-safe shutdown message
-    //     std::stringstream ss;
-    //     ss << "[Worker thread " << std::this_thread::get_id() << " shutting down]" << std::endl;
-    //     std::lock_guard<std::mutex> lock(stats_mutex);
-    //     std::cout << ss.str();
-    // }
 }
 
-/**
- * @brief The PRODUCER thread function.
- */
 void pcap_capture_thread(pcap_t *handle, int packet_count) {
-    // (FIX) Check pcap_loop's return value for errors.
     int ret = pcap_loop(handle, packet_count, producer_callback, NULL);
     
     if (ret == -1) {
-        // A pcap error occurred. Store it so main can print it.
         g_pcap_error = pcap_geterr(handle);
     }
-    // ret == 0 means it finished (hit packet_count)
-    // ret == -2 means it was broken by pcap_breakloop (user pressed 'q' or Ctrl+C)
-    // All of these are valid reasons to shut down.
 
-    // After the loop finishes (for any reason),
-    // signal the shutdown.
     shutting_down = true;
-    queue_cond.notify_all(); // Wake up all workers
+    queue_cond.notify_all();
 }
+
+void print_usage(char *progname) {
+    std::cerr << "Professional Sniffer Tool (TUI Edition)" << std::endl;
+    std::cerr << "Usage: " << progname << " [options]" << std::endl;
+    std::cerr << "  -i <interface>   Live capture from <interface> (e.g., en0)" << std::endl;
+    std::cerr << "  -r <file>        Read packets from <file> (e.g., capture.pcap)" << std::endl;
+    std::cerr << "  -c <count>       Stop after <count> packets (default: -1, infinite)" << std::endl;
+    std::cerr << "  -f <filter>      Set BPF filter (e.g., \"tcp port 80\")" << std::endl;
+    std::cerr << "  -h               Show this help menu" << std::endl;
+    std::cerr << "  -t <threads>     Number of worker threads (default: auto [N-1 cores])" << std::endl;
+    exit(1);
+}
+

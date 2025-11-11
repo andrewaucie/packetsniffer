@@ -29,15 +29,15 @@ LDFLAGS = -lpcap -pthread -lncurses
 TARGET = sniffer
 
 # Source Files (.cpp)
-SOURCES = src/app.cpp src/parsers.cpp src/reassembly.cpp
+SOURCES = src/main.cpp src/core.cpp src/ui.cpp src/reassembly.cpp
 
 # Object Files (.o)
-# Automatically generates a list like: sniffer.o parsers.o reassembly.o
+# Automatically generates a list like: main.o core.o ui.o reassembly.o
 OBJECTS = $(SOURCES:.cpp=.o)
 
-# Header Files (.h)
+# Header Files (.hpp)
 # Used to ensure .o files are rebuilt if a header they depend on changes.
-HEADERS = include/app.hpp include/parsers.hpp include/reassembly.hpp
+HEADERS = include/core.hpp include/ui.hpp include/reassembly.hpp
 
 # --- Rules ---
 
@@ -54,7 +54,7 @@ $(TARGET): $(OBJECTS)
 
 # Generic pattern rule to build .o files from .cpp files.
 # This says "To build any .o file, you need its .cpp file and all headers."
-# If any .cpp or .h file changes, this rule will re-run for the relevant .o.
+# If any .cpp or .hpp file changes, this rule will re-run for the relevant .o.
 %.o: %.cpp $(HEADERS)
 	@echo "Compiling $<..."
 	$(CXX) $(CXXFLAGS) -c $< -o $@

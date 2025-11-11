@@ -11,10 +11,8 @@
 #include "reassembly.hpp"
 
 // --- Global Variable Definitions ---
-// These are defined in app.cpp and declared 'extern' in reassembly.hpp
 std::map<ConnectionTuple, ConnectionData> tcp_sessions;
 std::mutex session_mutex;
-
 
 // --- Struct/Class Definitions ---
 
@@ -25,13 +23,8 @@ bool ConnectionTuple::operator<(const ConnectionTuple& other) const {
     return dport < other.dport;
 }
 
-
 // --- Function Definitions ---
 
-/**
- * @brief Thread-safe function to insert a packet's payload
- * into the correct session buffer.
- */
 std::string handle_tcp_reassembly(const u_char *payload, unsigned int payload_len, uint32_t seq_num, ConnectionTuple tuple) {
     if (payload_len == 0) return "";
 
@@ -73,11 +66,6 @@ void get_reassembled_stream(ConnectionData& session, std::stringstream& ss) {
     }
 }
 
-/**
- * @brief Thread-safe function to find, print, and
- * clean up both sides of a closing TCP connection.
- * Returns a PacketSummary for the UI.
- */
 PacketSummary handle_stream_close(ConnectionTuple tuple) {
     
     // Lock the session map before reading/deleting
@@ -90,7 +78,7 @@ PacketSummary handle_stream_close(ConnectionTuple tuple) {
     std::stringstream info_ss;
     info_ss << "TCP Stream Closed (";
     
-    size_t chunks_a = 0, chunks_b = 0; // Use size_t
+    size_t chunks_a = 0, chunks_b = 0;
 
     bool had_connection = false;
 
@@ -137,9 +125,9 @@ PacketSummary handle_stream_close(ConnectionTuple tuple) {
     summary.src_port = std::to_string(ntohs(tuple.sport));
     summary.dst_port = std::to_string(ntohs(tuple.dport));
     summary.info = info_ss.str();
-    summary.ttl = 0; // TTL not available for stream close events
-    summary.len = 0; // Length not applicable for stream close
-    gettimeofday(&summary.timestamp, NULL); // Use current time for stream close
+    summary.ttl = 0;
+    summary.len = 0;
+    gettimeofday(&summary.timestamp, NULL);
 
     return summary;
 }
