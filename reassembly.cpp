@@ -38,6 +38,17 @@ std::string handle_tcp_reassembly(const u_char *payload, unsigned int payload_le
     // Lock the session map to prevent data races
     std::lock_guard<std::mutex> lock(session_mutex);
 
+    bool is_new_direction = (tcp_sessions.find(tuple) == tcp_sessions.end());
+    if (is_new_direction) {
+        ConnectionTuple reverse_tuple = tuple;
+        std::swap(reverse_tuple.ip_src, reverse_tuple.ip_dst);
+        std::swap(reverse_tuple.sport, reverse_tuple.dport);
+
+        if (tcp_sessions.find(reverse_tuple) == tcp_sessions.end()) {
+            tcp_session_count.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+
     tcp_sessions[tuple].data_buffer[seq_num] = std::vector<u_char>(payload, payload + payload_len);
 
     return "Payload: " + std::to_string(payload_len) + "B";
@@ -81,14 +92,18 @@ PacketSummary handle_stream_close(ConnectionTuple tuple) {
     
     size_t chunks_a = 0, chunks_b = 0; // Use size_t
 
+    bool had_connection = false;
+
     // Clean up the A -> B stream
     if (tcp_sessions.count(tuple)) {
+        had_connection = true;
         chunks_a = tcp_sessions[tuple].data_buffer.size();
         tcp_sessions.erase(tuple);
     }
     
     // Clean up the B -> A stream
     if (tcp_sessions.count(tuple_reverse)) {
+        had_connection = true;
         chunks_b = tcp_sessions[tuple_reverse].data_buffer.size();
         tcp_sessions.erase(tuple_reverse);
     }
@@ -101,6 +116,18 @@ PacketSummary handle_stream_close(ConnectionTuple tuple) {
         stats_map["TCP Streams"]++;
     }
 
+    if (had_connection) {
+        long expected = tcp_session_count.load(std::memory_order_relaxed);
+        while (expected > 0 &&
+               !tcp_session_count.compare_exchange_weak(
+                   expected,
+                   expected - 1,
+                   std::memory_order_relaxed,
+                   std::memory_order_relaxed)) {
+            // Loop until successful or count observed as zero
+        }
+    }
+
     // Create a PacketSummary for the UI
     PacketSummary summary;
     summary.l3_protocol = (tuple.ip_src.find(':') != std::string::npos) ? "IPv6" : "IPv4";
@@ -110,6 +137,9 @@ PacketSummary handle_stream_close(ConnectionTuple tuple) {
     summary.src_port = std::to_string(ntohs(tuple.sport));
     summary.dst_port = std::to_string(ntohs(tuple.dport));
     summary.info = info_ss.str();
+    summary.ttl = 0; // TTL not available for stream close events
+    summary.len = 0; // Length not applicable for stream close
+    gettimeofday(&summary.timestamp, NULL); // Use current time for stream close
 
     return summary;
 }

@@ -47,6 +47,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h> // For usleep() in the UI thread
+#include <sys/time.h> // For gettimeofday() and timeval
 
 // --- Custom Header Definitions ---
 
@@ -90,6 +91,7 @@ extern std::condition_variable queue_cond;
 struct PacketSummary {
     int id;
     unsigned int len;
+    struct timeval timestamp; // Packet timestamp
     std::string l3_protocol;
     std::string l4_protocol;
     std::string src_ip;
@@ -97,6 +99,7 @@ struct PacketSummary {
     std::string src_port;
     std::string dst_port;
     std::string info;
+    int ttl; // TTL value (for IPv4/IPv6)
 };
 
 // --- Thread-Safe Global "Model" ---
@@ -113,7 +116,11 @@ extern std::string g_pcap_error;
 // --- Statistics Model ---
 extern std::mutex stats_mutex;
 extern std::map<std::string, long> stats_map;
+extern std::map<std::string, long> ip_stats_map;
 extern struct pcap_stat g_pcap_stats;
+extern std::atomic<unsigned long> packets_processed; // Count of filtered/processed packets
+extern std::atomic<unsigned long long> total_bytes; // Total bytes processed
+extern std::atomic<long> tcp_session_count; // Active TCP sessions
 
 // --- Results Model ---
 extern std::mutex results_mutex;

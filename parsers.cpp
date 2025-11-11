@@ -11,7 +11,6 @@
 #include "parsers.h"
 #include "sniffer.h"
 #include "reassembly.h" // For TCP reassembly
-#include <chrono>
 
 // Thread-safe atomic packet counter
 // This is 'static' so it is local *only* to this file.
@@ -156,6 +155,7 @@ static void handle_ipv4_packet(const u_char *l3_payload, unsigned int l3_len, Pa
     inet_ntop(AF_INET, &(ip_header->ip_dst), dst_ip_str, INET_ADDRSTRLEN);
     summary.src_ip = src_ip_str;
     summary.dst_ip = dst_ip_str;
+    summary.ttl = ip_header->ip_ttl; // Extract TTL
 
     unsigned int ip_header_size = ip_header->ip_hl * 4;
     if (ip_header_size < 20) return; // Basic validation
@@ -197,6 +197,7 @@ static void handle_ipv6_packet(const u_char *l3_payload, unsigned int l3_len, Pa
     inet_ntop(AF_INET6, &(ip6_header->ip6_dst), dst_ip6, INET6_ADDRSTRLEN);
     summary.src_ip = src_ip6;
     summary.dst_ip = dst_ip6;
+    summary.ttl = ip6_header->ip6_hlim; // Extract hop limit (IPv6 equivalent of TTL)
 
     int next_header_type = ip6_header->ip6_nxt;
     unsigned int l4_offset = sizeof(struct ip6_hdr);
@@ -245,6 +246,8 @@ static PacketSummary process_packet(const struct pcap_pkthdr *header, const u_ch
     PacketSummary summary;
     summary.id = packet_id++; // Atomically increment and assign
     summary.len = header->caplen;
+    summary.timestamp = header->ts; // Store packet timestamp
+    summary.ttl = 0; // Initialize TTL
 
     const struct ether_header *eth_header = (const struct ether_header *)packet;
     uint16_t ether_type = ntohs(eth_header->ether_type);
@@ -334,13 +337,24 @@ void consumer_thread_loop() {
 
         // --- 1. Process Packet ---
         PacketSummary summary = process_packet(&packet_to_process.header, packet_to_process.data.data());
+        unsigned int packet_len = packet_to_process.header.caplen;
 
-        // --- 2. Update Model ---
+        // --- 2. Increment processed packet counter ---
+        packets_processed++;
+        total_bytes.fetch_add(packet_len, std::memory_order_relaxed);
+
+        // --- 3. Update Model ---
         {
             std::lock_guard<std::mutex> lock(stats_mutex);
             stats_map[summary.l3_protocol]++;
             if (!summary.l4_protocol.empty()) {
                 stats_map[summary.l4_protocol]++;
+            }
+            if (!summary.src_ip.empty()) {
+                ip_stats_map[summary.src_ip] += static_cast<long>(packet_len);
+            }
+            if (!summary.dst_ip.empty()) {
+                ip_stats_map[summary.dst_ip] += static_cast<long>(packet_len);
             }
         }
         

@@ -1,76 +1,114 @@
-# C++ Professional Packet Sniffer
+# C++ Professional Packet Sniffer (TUI Edition)
 
-This is a high-performance, stateful C++ packet sniffer that runs on the command line. It is capable of capturing live network traffic (or reading from a .pcap file), parsing protocols from Layer 2 to Layer 7, and performing stateful TCP stream reassembly.This tool is a practical demonstration of core C++ concepts (OOP, STL, memory management) and deep networking principles (protocol de-encapsulation, TCP state management).FeaturesMulti-Protocol Parsing:L2: Ethernet (with VLAN 802.1Q support)L3: IPv4, IPv6, and ARPL4: TCP, UDP, ICMP, and ICMPv6L7: Detects and parses DNS and HTTPStateful TCP Reassembly:Tracks individual TCP connections (for both IPv4 and IPv6).Buffers out-of-order packets.Reassembles and prints the full data stream (e.g., an entire HTTP request) when a connection closes (FIN/RST).Flexible Capture Options:Captures from a live network interface (-i).Reads packets from a saved .pcap file (-r).Powerful Filtering:Uses the standard BPF (Berkeley Packet Filter) syntax to filter captures (e.g., "tcp port 80" or "host 8.8.8.8").Advanced Protocol Handling:Correctly walks the IPv6 Extension Header chain to find the true L4 protocol.Parses ARP requests and replies to show local network lookups.Project StructureThe project is split into a professional, multi-file C++ structure for readability and maintainability.sniffer.cpp: (Main Executable)Contains only the main() function.Responsible for parsing command-line arguments and setting up the pcap capture session.sniffer.h: (Master Header)Includes all common C/C++ libraries and networking headers.Defines the custom structs (my_arphdr, simple_dnshdr).parsers.cpp / parsers.h: (The Core Logic)packet_handler(): The main pcap callback function.Contains all helper functions for parsing each protocol layer (e.g., handle_ipv4_packet, handle_udp_packet).This is the "stateless" part of the sniffer.reassembly.cpp / reassembly.h: (The "Depth" Feature)ConnectionTuple: A struct to uniquely identify a TCP connection (works for both IPv4/IPv6).ConnectionData: A class to store the buffered packet data.tcp_sessions: The global std::map that manages all active connections.Implements the "stateful" logic for stream reassembly.Getting StartedPrerequisitesYou must have the libpcap development library installed.On macOS: It is included with the Xcode Command Line Tools.On Linux (Ubuntu/Debian):sudo apt-get update
-sudo apt-get install libpcap-dev
+## Overview
+This project is a multithreaded, ncurses-driven packet sniffer that ingests live traffic or offline `.pcap` files, performs full Layer 2–7 decoding, and reassembles TCP streams in real time. It is designed as a professional-grade reference for modern C++ (C++11) networking, demonstrating producer/consumer pipelines, stateful parsing, and an operator-friendly terminal UI.
 
-On Linux (Fedora/RHEL):sudo dnf install libpcap-devel
+## Highlights
+- **Interactive dashboard** – ncurses layout with live protocol counts, libpcap statistics, bandwidth graph, top talkers, and a rolling packet log. Resize your terminal freely; the panes adapt automatically.
+- **Threaded capture pipeline** – dedicated producer thread feeds a worker pool (`-t <threads>` or auto-detected) so parsing keeps up with busy links without dropping packets.
+- **Deep protocol coverage** – Ethernet (incl. 802.1Q), IPv4/IPv6, ARP, TCP, UDP, ICMP/ICMPv6, DNS decoding, and HTTP request/response extraction.
+- **Stateful TCP reassembly** – rebuilds byte streams bidirectionally, handles out-of-order segments, and prints each conversation once FIN/RST is observed.
+- **Flexible sources & filters** – capture from an interface (`-i`) or offline file (`-r`), apply standard BPF expressions (`-f "tcp port 80"`), and optionally stop after N packets (`-c`).
+- **Operational safeguards** – graceful shutdown on `q`/`Ctrl+C`, defensive ncurses initialization (TERM validation, sudo preservation), and real-time visibility into drops and queue depth.
 
-CompilationPlace all 6 files (sniffer.h, sniffer.cpp, parsers.h, parsers.cpp, reassembly.h, reassembly.cpp) in the same directory.Compile the project by linking all implementation files and the pcap library:g++ sniffer.cpp parsers.cpp reassembly.cpp -o sniffer -lpcap
+## Build & Install
 
-If your compiler warns about C++17 features, you can specify an older standard (the code is C++11 compatible):g++ -std=c++11 sniffer.cpp parsers.cpp reassembly.cpp -o sniffer -lpcap
+### Prerequisites
+- `libpcap` development headers
+- `ncurses` development headers
+- A C++11-capable compiler (tested with `g++`)
 
-UsageThe program is run with command-line flags.Professional Sniffer Tool (Stateful, Multi-Protocol)
-Usage: ./sniffer [options]
-  -i <interface>   Live capture from <interface> (e.g., en0)
-  -r <file>        Read packets from <file> (e.g., capture.pcap)
-  -c <count>       Stop after <count> packets (default: 100)
-  -f <filter>      Set BPF filter (e.g., "tcp port 80")
-  -h               Show this help menu
+macOS (with Xcode CLT) already ships `libpcap` and `ncurses`.  
+Ubuntu / Debian:
 
-Note: You must use sudo for any live capture (the -i flag) to grant the program permission to access the network card.ExamplesExample 1: See All Local Network TrafficThis is a great test to see everything, including ARP, ICMP, and IPv6 traffic.# Replace 'en0' with your device (e.g., wlan0 on Linux)
-sudo ./sniffer -i en0
+```
+sudo apt update
+sudo apt install build-essential libpcap-dev libncurses5-dev
+```
 
-You will see a mix of traffic, including ARP requests from your computer asking for your router's MAC address:--- Packet #5 (42 bytes) ---
-L2 - Dst MAC: ff:ff:ff:ff:ff:ff  Src MAC: 82:18:b1:03:ac:a8
-L3 - Protocol: ARP
-    L3 - ARP Operation: Request
-        Who has 192.168.0.1? Tell 82:18:b1:03:ac:a8 (192.168.0.146)
+Fedora / RHEL:
 
-Example 2: Reassemble an HTTP RequestThis demonstrates the TCP stream reassembly feature.In Terminal 1:# Listen *only* for unencrypted web traffic
-sudo ./sniffer -i en0 -f "tcp port 80"
+```
+sudo dnf install gcc-c++ libpcap-devel ncurses-devel
+```
 
-In Terminal 2:# Make an unencrypted web request
-curl [http://http.debian.net/](http://http.debian.net/)
+### Build
 
-Terminal 1 Output:Your sniffer will print the individual packets (SYN, SYN-ACK, ACK, PSH...) and then, when the connection closes, it will print the two reassembled streams:--- REASSEMBLED STREAM (192.168.0.146:49592 -> 151.101.126.132:80) ---
-GET / HTTP/1.1
-Host: http.debian.net
-User-Agent: curl/8.7.1
-Accept: */*
+```
+cd /Users/andrewaucie/Desktop/D58
+make
+```
 
---- REASSEMBLED STREAM (151.101.126.132:80 -> 192.168.0.146:49592) ---
-HTTP/1.1 200 OK
-Connection: keep-alive
-Content-Length: 1876
-...
-<!DOCTYPE HTML PUBLIC ...>
-... (rest of HTML page) ...
---- END OF CONVERSATION ---
+The Makefile links `libpcap`, `pthread`, and `ncurses`. Run `make clean` to remove artifacts.
 
-Example 3: Monitor DNS LookupsThis shows the L7 parser for DNS (which runs over UDP).In Terminal 1:# Listen *only* for DNS traffic
-sudo ./sniffer -i en0 -f "udp port 53"
+## Running the Sniffer
 
-In Terminal 2:# Ping a website to trigger a DNS lookup
-ping google.com
+```
+sudo ./sniffer [options]
+```
 
-Terminal 1 Output:You will see the DNS "Question" packet from your computer and the "Answer" packet from the DNS server.--- Packet #1 (78 bytes) ---
-L3 - Protocol: IPv4
-    L3 - From IP: 192.168.0.146 -> To IP: 8.8.8.8
-    L4 - UDP: 192.168.0.146:58804 -> 8.8.8.8:53
-        L7 - DNS:
-            ID: 0x4a1b  Questions: 1  Answers: 0
+| Option | Description |
+| --- | --- |
+| `-i <interface>` | Live capture from the given device (e.g., `en0`, `eth0`). |
+| `-r <file>` | Read packets from a saved capture. Implies offline mode (no sudo needed). |
+| `-c <count>` | Stop after N packets. Default `-1` means run until stopped. |
+| `-f <filter>` | Berkeley Packet Filter expression (`tcp`, `udp port 53`, etc.). |
+| `-t <threads>` | Number of worker threads. Defaults to hardware concurrency minus one. |
+| `-h` | Show usage help and exit. |
 
---- Packet #2 (122 bytes) ---
-L3 - Protocol: IPv4
-    L3 - From IP: 8.8.8.8 -> To IP: 192.168.0.146
-    L4 - UDP: 8.8.8.8:53 -> 192.168.0.146:58804
-        L7 - DNS:
-            ID: 0x4a1b  Questions: 1  Answers: 1
+Press `q` inside the UI to stop gracefully. `Ctrl+C` is also handled, ensuring ncurses restores the terminal state.
 
-Example 4: Analyze a Saved FileThis is perfect for debugging. You can capture traffic with a tool like Wireshark or tcpdump and analyze it with your sniffer. No sudo is required.# First, create a small capture file
-sudo tcpdump -i en0 -c 20 -w test.pcap
+### Example Workflows
 
-# Now, analyze that file with your tool
-./sniffer -r test.pcap
+- **Watch everything on an interface**
+  ```
+  sudo ./sniffer -i en0
+  ```
 
-A Note for macOS UsersmacOS has strong security features. Even with sudo, pcap may be blocked from capturing all traffic. If your sniffer sees no packets, you must grant "Full Disk Access" to your terminal application.Go to System Settings > Privacy & Security > Full Disk Access.Click +, authenticate, and add your terminal application (e.g., Terminal.app or iTerm.app).If you are running the sniffer from VS Code's integrated terminal, you must add Visual Studio Code.app.Quit and restart your terminal application for the changes to take effect.
+- **Inspect cleartext HTTP with TCP reassembly**
+  ```
+  sudo ./sniffer -i en0 -f "tcp port 80"
+  curl http://example.com
+  ```
+  Reassembled request/response bodies appear in the live packet log when sessions close.
+
+- **Focus on DNS diagnostics**
+  ```
+  sudo ./sniffer -i en0 -f "udp port 53"
+  ping google.com
+  ```
+  Observe question/answer flows and top talkers for DNS servers.
+
+- **Analyze a captured file offline**
+  ```
+  sudo tcpdump -i en0 -c 50 -w test.pcap
+  ./sniffer -r test.pcap
+  ```
+
+## UI Reference
+- **Protocol Stats** – running counts per L2/L3/L4/L7 classification (`Ethernet`, `IPv6`, `TCP`, `HTTP`, etc.).
+- **Capture Stats** – libpcap totals (received, processed, dropped) and current queue size for back-pressure visibility.
+- **Live Bandwidth** – smoothed bytes-per-second meter with human-readable units.
+- **Top Talkers** – rolling leaderboard of IPs producing the most traffic, independent of protocol.
+- **Packet Log** – tail of detailed packet summaries and reassembly output; updated continuously.
+
+Resize the terminal to allocate more space to the sections you care about. The layout recomputes each pass of the UI loop.
+
+## Architecture Overview
+- `sniffer.cpp` – main entry point, CLI parsing, ncurses lifecycle, producer thread (`pcap_loop`), and worker pool orchestration.
+- `parsers.cpp` / `parsers.h` – protocol decoding routines used by the workers; updates statistics and composes `PacketSummary` records.
+- `reassembly.cpp` / `reassembly.h` – TCP state tracking via `ConnectionTuple` and `ConnectionData`, buffering segments until FIN/RST, then flushing the reconstructed stream.
+
+The pipeline follows a classical producer/consumer pattern:
+1. **Producer** (`pcap_capture_thread`) grabs frames and enqueues decoded metadata plus raw payload.
+2. **Workers** pull from the queue, run protocol-specific parsers, and update stats/top talkers.
+3. **UI thread** renders the shared state at ~10 Hz while watching for `q`.
+
+## Troubleshooting & Tips
+- Run with `sudo -E` (or export `TERM`) to ensure the ncurses dashboard initializes when elevating privileges.
+- On macOS, grant Full Disk Access to your terminal/iTerm/VS Code if `libpcap` appears to drop all packets.
+- If the queue grows and drops spike, increase worker threads (`-t`) or narrow the BPF filter.
+- Use `error_log.txt` for troubleshooting unexpected runtime failures; the program appends detailed messages before exiting.
+
+Happy packet hunting!
+
