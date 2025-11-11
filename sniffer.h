@@ -1,102 +1,123 @@
 /*
  * sniffer.h
  *
- * This is the master header file for the project.
+ * This is the master header file for the TUI project.
  * It includes all common C/C++ libraries, networking headers,
  * and threading headers. It also defines all custom data
- * structures and global, thread-safe components.
+ * structures and 'extern' declarations for global components.
  */
 
 #ifndef SNIFFER_H
 #define SNIFFER_H
 
 // --- Standard C++ Headers ---
-#include <iostream>     // For std::cout, std::cerr
-#include <iomanip>      // For std::setw, std::setfill, std::hex
-#include <map>          // For std::map (session tracking)
-#include <vector>       // For std::vector (packet data buffering)
-#include <string>       // For std::string (protocol-agnostic IPs)
-#include <sstream>      // For std::stringstream (thread-safe output buffering)
-#include <cctype>       // For isprint()
-#include <csignal>      // For signal handling (SIGINT)
+#include <iostream>
+#include <iomanip>
+#include <map>
+#include <vector>
+#include <string>
+#include <sstream>
+#include <cctype>
+#include <csignal>
+#include <deque> // For the results queue
+
+// --- TUI Header ---
+#include <ncurses.h> // The TUI library
 
 // --- Multithreading Headers ---
-#include <thread>               // For std::thread
-#include <mutex>                // For std::mutex, std::lock_guard, std::unique_lock
-#include <condition_variable>   // For std::condition_variable
-#include <queue>                // For std::queue
-#include <atomic>               // For std::atomic<bool>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <queue>
+#include <atomic>
 
 // --- C Networking Headers ---
-#include <pcap.h>       // The main libpcap library
-#include <arpa/inet.h>  // For ntohs, ntohl, inet_ntop
-#include <netinet/if_ether.h> // For struct ether_header, ETHERTYPE_...
-#include <netinet/ip.h>       // For struct ip, IPPROTO_...
-#include <netinet/ip6.h>      // For struct ip6_hdr
-#include <netinet/tcp.h>      // For struct tcphdr, TH_SYN, etc.
-#include <netinet/udp.h>      // For struct udphdr
-#include <netinet/ip_icmp.h>  // For ICMP
-#include <netinet/icmp6.h>  // For ICMPv6
-#include <net/if_arp.h>       // For system's arphdr
+#include <pcap.h>
+#include <arpa/inet.h>
+#include <netinet/if_ether.h>
+#include <netinet/ip.h>
+#include <netinet/ip6.h>
+#include <netinet/tcp.h>
+#include <netinet/udp.h>
+#include <netinet/ip_icmp.h>
+#include <netinet/icmp6.h>
+#include <net/if_arp.h>
 
 // --- C Standard Library Headers ---
-#include <stdlib.h>     // For atoi, exit
-#include <string.h>     // For strcmp
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h> // For usleep() in the UI thread
 
 // --- Custom Header Definitions ---
 
-/**
- * @struct my_arphdr
- * @brief Custom ARP header definition to avoid conflicts with
- * different system header implementations (e.g., macOS vs. Linux).
- */
+// Custom ARP header (renamed to avoid conflicts)
 struct my_arphdr {
-    uint16_t htype;    // Hardware Type
-    uint16_t ptype;    // Protocol Type
-    uint8_t  hlen;     // Hardware Address Length
-    uint8_t  plen;     // Protocol Address Length
-    uint16_t oper;     // Operation Code (1=request, 2=reply)
-    u_char   sha[6];   // Sender Hardware Address (MAC)
-    u_char   spa[4];   // Sender Protocol Address (IP)
-    u_char   tha[6];   // Target Hardware Address (MAC)
-    u_char   tpa[4];   // Target Protocol Address (IP)
+    uint16_t htype, ptype;
+    uint8_t  hlen, plen;
+    uint16_t oper;
+    u_char   sha[6], spa[4], tha[6], tpa[4];
 };
 
-/**
- * @struct simple_dnshdr
- * @brief A simplified DNS header for parsing basic info.
- */
+// Simplified DNS header
 struct simple_dnshdr {
     uint16_t id, flags, qdcount, ancount, nscount, arcount;
 };
-
 
 // --- Producer-Consumer Queue Components ---
 
 /**
  * @struct QueuedPacket
- * @brief A container to hold a packet's data and metadata
- * as it passes from the producer to the consumers.
- * Using std::vector ensures we have our own copy of the
- * packet data, as the libpcap buffer is ephemeral.
+ * @brief Holds a full copy of the packet data to be
+ * passed from the producer to a consumer.
  */
 struct QueuedPacket {
-    pcap_pkthdr header;               // Packet metadata (timestamp, len)
-    std::vector<u_char> data;         // Packet data buffer
+    pcap_pkthdr header;
+    std::vector<u_char> data;
 };
 
-// Global thread-safe queue for packets
+// 'extern' tells the compiler "this global exists, but is defined elsewhere"
 extern std::queue<QueuedPacket> packet_queue;
 extern std::mutex queue_mutex;
 extern std::condition_variable queue_cond;
 
-// Global flag to signal threads to shut down
-extern std::atomic<bool> shutting_down;
+// --- TUI Model Data Structures ---
 
-// Global mutex to protect std::cout from being scrambled by threads
-extern std::mutex print_mutex;
+/**
+ * @struct PacketSummary
+ * @brief A lightweight struct holding the *results* of parsing one packet.
+ * This is what consumers push to the UI thread.
+ */
+struct PacketSummary {
+    int id;
+    unsigned int len;
+    std::string l3_protocol;
+    std::string l4_protocol;
+    std::string src_ip;
+    std::string dst_ip;
+    std::string src_port;
+    std::string dst_port;
+    std::string info;
+};
+
+// --- Thread-Safe Global "Model" ---
+
+// Global flag to signal all threads to shut down
+extern std::atomic<bool> shutting_down;
 
 // Global pcap handle, needed for the signal handler to break the loop
 extern pcap_t* g_handle;
+
+// (FIX) Global string to hold any pcap capture errors
+extern std::string g_pcap_error;
+
+// --- Statistics Model ---
+extern std::mutex stats_mutex;
+extern std::map<std::string, long> stats_map;
+extern struct pcap_stat g_pcap_stats;
+
+// --- Results Model ---
+extern std::mutex results_mutex;
+extern std::deque<PacketSummary> results_queue;
+extern const size_t MAX_RESULTS;
 
 #endif // SNIFFER_H

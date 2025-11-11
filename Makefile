@@ -1,8 +1,8 @@
 #
 # Makefile for the C++ Professional Packet Sniffer
 #
-# This Makefile builds the multithreaded application and correctly
-# links all necessary libraries (libpcap and pthread).
+# This Makefile builds the multithreaded TUI application and correctly
+# links all necessary libraries (libpcap, pthread, and ncurses).
 #
 
 # --- Variables ---
@@ -20,9 +20,10 @@ CXX = g++
 CXXFLAGS = -std=c++11 -Wall -Wextra -g -O2 -pthread
 
 # Linker Flags:
-# -lpcap   : Link the libpcap library
-# -pthread : Required at the linking stage for std::thread
-LDFLAGS = -lpcap -pthread
+# -lpcap     : Link the libpcap library
+# -pthread   : Required at the linking stage for std::thread
+# -lncurses  : Link the ncurses TUI library
+LDFLAGS = -lpcap -pthread -lncurses
 
 # Executable Name
 TARGET = sniffer
@@ -41,7 +42,6 @@ HEADERS = sniffer.h parsers.h reassembly.h
 # --- Rules ---
 
 # The default rule ('all') is the first one in the file.
-# It depends on the final executable.
 # Running 'make' will execute this rule.
 all: $(TARGET)
 

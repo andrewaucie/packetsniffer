@@ -3,21 +3,21 @@
  *
  * Defines the implementation for TCP stream reassembly.
  * This file contains all stateful logic and is fully thread-safe.
+ *
+ * In this TUI version, functions do not print. They return
+ * data to the worker threads, which then update the global model.
  */
 
 #include "reassembly.h"
 
 // --- Global Variable Definitions ---
+// These are defined in sniffer.cpp and declared 'extern' in reassembly.h
 std::map<ConnectionTuple, ConnectionData> tcp_sessions;
 std::mutex session_mutex;
 
 
 // --- Struct/Class Definitions ---
 
-/**
- * @brief Defines the comparison logic for ConnectionTuple,
- * allowing it to be a key in std::map.
- */
 bool ConnectionTuple::operator<(const ConnectionTuple& other) const {
     if (ip_src != other.ip_src) return ip_src < other.ip_src;
     if (ip_dst != other.ip_dst) return ip_dst < other.ip_dst;
@@ -32,24 +32,23 @@ bool ConnectionTuple::operator<(const ConnectionTuple& other) const {
  * @brief Thread-safe function to insert a packet's payload
  * into the correct session buffer.
  */
-void handle_tcp_reassembly(const u_char *payload, int payload_len, uint32_t seq_num, ConnectionTuple tuple) {
-    if (payload_len <= 0) return;
+std::string handle_tcp_reassembly(const u_char *payload, unsigned int payload_len, uint32_t seq_num, ConnectionTuple tuple) {
+    if (payload_len == 0) return "";
 
     // Lock the session map to prevent data races
     std::lock_guard<std::mutex> lock(session_mutex);
 
-    // This one line is the magic.
-    // 1. [tuple] finds or creates the session.
-    // 2. .data_buffer[seq_num] finds or creates the buffer for this sequence number.
-    // 3. We assign the payload data to it.
     tcp_sessions[tuple].data_buffer[seq_num] = std::vector<u_char>(payload, payload + payload_len);
+
+    return "Payload: " + std::to_string(payload_len) + "B";
 }
 
 /**
- * @brief Iterates over the ordered map of data chunks and
+ * @brief (No longer used by TUI, but good to keep)
+ * Iterates over the ordered map of data chunks and
  * writes the payload as ASCII to the stringstream.
  */
-void print_reassembled_stream(ConnectionData& session, std::stringstream& ss) {
+void get_reassembled_stream(ConnectionData& session, std::stringstream& ss) {
     if (session.data_buffer.empty()) return;
 
     // Use C++11 compatible loop
@@ -58,42 +57,59 @@ void print_reassembled_stream(ConnectionData& session, std::stringstream& ss) {
         
         const std::vector<u_char>& data = it->second;
         for (u_char c : data) {
-            // Print printable characters, or '.' for non-printable
             ss << (isprint(c) || c == '\n' || c == '\r' ? (char)c : '.');
         }
     }
-    ss << std::endl;
 }
 
 /**
  * @brief Thread-safe function to find, print, and
  * clean up both sides of a closing TCP connection.
+ * Returns a PacketSummary for the UI.
  */
-void handle_stream_close(ConnectionTuple tuple, std::stringstream& ss) {
-    ss << "        CONNECTION END (FIN/RST) DETECTED." << std::endl;
+PacketSummary handle_stream_close(ConnectionTuple tuple) {
     
     // Lock the session map before reading/deleting
     std::lock_guard<std::mutex> lock(session_mutex);
 
-    // Create the reverse tuple to find the other side
     ConnectionTuple tuple_reverse = tuple;
     std::swap(tuple_reverse.ip_src, tuple_reverse.ip_dst);
     std::swap(tuple_reverse.sport, tuple_reverse.dport);
+    
+    std::stringstream info_ss;
+    info_ss << "TCP Stream Closed (";
+    
+    size_t chunks_a = 0, chunks_b = 0; // Use size_t
 
-    // Print and erase the A -> B stream
+    // Clean up the A -> B stream
     if (tcp_sessions.count(tuple)) {
-        ss << "\n--- REASSEMBLED STREAM (" << tuple.ip_src << ":" << ntohs(tuple.sport)
-           << " -> " << tuple.ip_dst << ":" << ntohs(tuple.dport) << ") ---" << std::endl;
-        print_reassembled_stream(tcp_sessions[tuple], ss);
+        chunks_a = tcp_sessions[tuple].data_buffer.size();
         tcp_sessions.erase(tuple);
     }
     
-    // Print and erase the B -> A stream
+    // Clean up the B -> A stream
     if (tcp_sessions.count(tuple_reverse)) {
-        ss << "\n--- REASSEMBLED STREAM (" << tuple_reverse.ip_src << ":" << ntohs(tuple_reverse.sport)
-           << " -> " << tuple_reverse.ip_dst << ":" << ntohs(tuple_reverse.dport) << ") ---" << std::endl;
-        print_reassembled_stream(tcp_sessions[tuple_reverse], ss);
+        chunks_b = tcp_sessions[tuple_reverse].data_buffer.size();
         tcp_sessions.erase(tuple_reverse);
     }
-    ss << "--- END OF CONVERSATION ---" << std::endl;
+    
+    info_ss << chunks_a << " / " << chunks_b << " chunks)";
+
+    // Update global stats (lock acquired inside)
+    {
+        std::lock_guard<std::mutex> lock(stats_mutex);
+        stats_map["TCP Streams"]++;
+    }
+
+    // Create a PacketSummary for the UI
+    PacketSummary summary;
+    summary.l3_protocol = (tuple.ip_src.find(':') != std::string::npos) ? "IPv6" : "IPv4";
+    summary.l4_protocol = "TCP";
+    summary.src_ip = tuple.ip_src;
+    summary.dst_ip = tuple.ip_dst;
+    summary.src_port = std::to_string(ntohs(tuple.sport));
+    summary.dst_port = std::to_string(ntohs(tuple.dport));
+    summary.info = info_ss.str();
+
+    return summary;
 }

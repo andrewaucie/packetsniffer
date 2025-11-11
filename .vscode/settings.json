@@ -47,6 +47,8 @@
         "variant": "cpp",
         "vector": "cpp",
         "algorithm": "cpp",
-        "condition_variable": "cpp"
-    }
+        "condition_variable": "cpp",
+        "map": "cpp"
+    },
+    "C_Cpp.errorSquiggles": "disabled"
 }
