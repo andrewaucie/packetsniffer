@@ -1,14 +1,14 @@
 /*
- * parsers.h
+ * parsers.hpp
  *
  * Declares the main producer/consumer functions
  * for the multithreaded architecture.
  */
 
-#ifndef PARSERS_H
-#define PARSERS_H
+#ifndef PARSERS_HPP
+#define PARSERS_HPP
 
-#include "sniffer.h" // For pcap_t
+#include "app.hpp" // For pcap_t
 
 /**
  * @brief The PRODUCER callback.
@@ -58,4 +58,4 @@ namespace {
     static PacketSummary process_packet(const struct pcap_pkthdr *header, const u_char *packet);
 }
 
-#endif // PARSERS_H
+#endif // PARSERS_HPP

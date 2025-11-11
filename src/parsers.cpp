@@ -8,9 +8,9 @@
  * architecture.
  */
 
-#include "parsers.h"
-#include "sniffer.h"
-#include "reassembly.h" // For TCP reassembly
+#include "parsers.hpp"
+#include "app.hpp"
+#include "reassembly.hpp" // For TCP reassembly
 
 // Thread-safe atomic packet counter
 // This is 'static' so it is local *only* to this file.

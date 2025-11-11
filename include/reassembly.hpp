@@ -1,5 +1,5 @@
 /*
- * reassembly.h
+ * reassembly.hpp
  *
  * Declares the classes, structs, and functions
  * used for stateful TCP stream reassembly.
@@ -7,10 +7,10 @@
  * This system is thread-safe and protocol-agnostic (IPv4/IPv6).
  */
 
-#ifndef REASSEMBLY_H
-#define REASSEMBLY_H
+#ifndef REASSEMBLY_HPP
+#define REASSEMBLY_HPP
 
-#include "sniffer.h" // Includes all our types and headers
+#include "app.hpp" // Includes all our types and headers
 
 /**
  * @struct ConnectionTuple
@@ -62,4 +62,4 @@ std::string handle_tcp_reassembly(
 PacketSummary handle_stream_close(ConnectionTuple tuple);
 
 
-#endif // REASSEMBLY_H
+#endif // REASSEMBLY_HPP

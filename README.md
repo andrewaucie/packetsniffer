@@ -97,9 +97,9 @@ Press `q` inside the UI to stop gracefully. `Ctrl+C` is also handled, ensuring n
 Resize the terminal to allocate more space to the sections you care about. The layout recomputes each pass of the UI loop.
 
 ## Architecture Overview
-- `sniffer.cpp` – main entry point, CLI parsing, ncurses lifecycle, producer thread (`pcap_loop`), and worker pool orchestration.
-- `parsers.cpp` / `parsers.h` – protocol decoding routines used by the workers; updates statistics and composes `PacketSummary` records.
-- `reassembly.cpp` / `reassembly.h` – TCP state tracking via `ConnectionTuple` and `ConnectionData`, buffering segments until FIN/RST, then flushing the reconstructed stream.
+- `src/app.cpp` / `include/app.hpp` – main entry point, CLI parsing, ncurses lifecycle, producer thread (`pcap_loop`), and worker pool orchestration.
+- `src/parsers.cpp` / `include/parsers.hpp` – protocol decoding routines used by the workers; updates statistics and composes `PacketSummary` records.
+- `src/reassembly.cpp` / `include/reassembly.hpp` – TCP state tracking via `ConnectionTuple` and `ConnectionData`, buffering segments until FIN/RST, then flushing the reconstructed stream.
 
 The pipeline follows a classical producer/consumer pattern:
 1. **Producer** (`pcap_capture_thread`) grabs frames and enqueues decoded metadata plus raw payload.

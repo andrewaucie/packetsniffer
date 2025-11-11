@@ -8,10 +8,10 @@
  * data to the worker threads, which then update the global model.
  */
 
-#include "reassembly.h"
+#include "reassembly.hpp"
 
 // --- Global Variable Definitions ---
-// These are defined in sniffer.cpp and declared 'extern' in reassembly.h
+// These are defined in app.cpp and declared 'extern' in reassembly.hpp
 std::map<ConnectionTuple, ConnectionData> tcp_sessions;
 std::mutex session_mutex;
 

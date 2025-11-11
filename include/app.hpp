@@ -1,14 +1,12 @@
 /*
- * sniffer.h
+ * app.hpp
  *
- * This is the master header file for the TUI project.
- * It includes all common C/C++ libraries, networking headers,
- * and threading headers. It also defines all custom data
- * structures and 'extern' declarations for global components.
+ * Master header for the TUI packet sniffer.
+ * Provides common includes, data structures, and extern declarations.
  */
 
-#ifndef SNIFFER_H
-#define SNIFFER_H
+#ifndef APP_HPP
+#define APP_HPP
 
 // --- Standard C++ Headers ---
 #include <iostream>
@@ -168,4 +166,4 @@ extern std::mutex timeline_mutex;
 extern std::map<std::string, ConversationTimelineEntry> conversation_timeline;
 extern const size_t MAX_TIMELINE_TRACKED;
 
-#endif // SNIFFER_H
+#endif // APP_HPP

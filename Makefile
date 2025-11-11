@@ -17,7 +17,7 @@ CXX = g++
 # -g         : Include debugging symbols (for GDB)
 # -O2        : Optimization level 2 (for a release build)
 # -pthread   : Enable and link the POSIX threads library
-CXXFLAGS = -std=c++11 -Wall -Wextra -g -O2 -pthread
+CXXFLAGS = -std=c++11 -Wall -Wextra -g -O2 -pthread -Iinclude
 
 # Linker Flags:
 # -lpcap     : Link the libpcap library
@@ -29,7 +29,7 @@ LDFLAGS = -lpcap -pthread -lncurses
 TARGET = sniffer
 
 # Source Files (.cpp)
-SOURCES = sniffer.cpp parsers.cpp reassembly.cpp
+SOURCES = src/app.cpp src/parsers.cpp src/reassembly.cpp
 
 # Object Files (.o)
 # Automatically generates a list like: sniffer.o parsers.o reassembly.o
@@ -37,7 +37,7 @@ OBJECTS = $(SOURCES:.cpp=.o)
 
 # Header Files (.h)
 # Used to ensure .o files are rebuilt if a header they depend on changes.
-HEADERS = sniffer.h parsers.h reassembly.h
+HEADERS = include/app.hpp include/parsers.hpp include/reassembly.hpp
 
 # --- Rules ---
 

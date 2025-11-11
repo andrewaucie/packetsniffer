@@ -1,5 +1,5 @@
 /*
- * sniffer.cpp
+ * app.cpp
  *
  * This is the main "driver" file for the TUI.
  *
@@ -11,8 +11,8 @@
  * 5. Handling user input ('q') and graceful shutdown.
  */
 
-#include "sniffer.h"
-#include "parsers.h"
+#include "app.hpp"
+#include "parsers.hpp"
 
 #include <algorithm>
 #include <chrono>
